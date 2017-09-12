@@ -1,9 +1,11 @@
 package main
 
 import (
-	"html/template"
 	"log"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/kataras/iris"
 	"github.com/kataras/iris/context"
@@ -30,25 +32,6 @@ func newApp(session *mgo.Session) *iris.Application {
 	coll := session.DB(os.Getenv("URLS_DB")).C("entities")
 
 	repo := NewRepository(DefaultGenerator, coll)
-	tmpl := iris.HTML("./templates", ".html").Reload(true)
-
-	tmpl.AddFunc("IsPositive", func(n int) bool {
-		if n > 0 {
-			return true
-		}
-
-		return false
-	})
-
-	app.RegisterView(tmpl)
-	app.StaticWeb("/static", "./resources")
-
-	indexHandler := func(ctx context.Context) {
-		ctx.ViewData("URL_COUNT", 100)
-		ctx.View("index.html")
-	}
-
-	app.Get("/", indexHandler)
 
 	execShortURL := func(ctx context.Context, key string) {
 		if key == "" {
@@ -71,29 +54,74 @@ func newApp(session *mgo.Session) *iris.Application {
 		ctx.Redirect(obj.URI, iris.StatusTemporaryRedirect)
 	}
 
-	app.Get("/u/{shortkey}", func(ctx context.Context) {
-		execShortURL(ctx, ctx.Params().Get("shortkey"))
+	app.StaticWeb("/site", "./client/public")
+	app.RegisterView(iris.HTML("./client/public", ".html"))
+
+	app.Get("/", func(ctx context.Context) {
+		ctx.View("index.html")
 	})
 
 	app.Post("/shorten", func(ctx context.Context) {
-		formValue := ctx.FormValue("url")
-		if formValue == "" {
-			ctx.ViewData("FORM_RESULT", "You need to a enter a URL")
-			ctx.StatusCode(iris.StatusLengthRequired)
-		} else {
-			data, err := repo.New(formValue)
+		value := &struct {
+			URL       string `json:"url"`
+			CustonKey string `json:"custom_key"`
+		}{}
 
-			if err != nil {
-				ctx.ViewData("FORM_RESULT", "Invalid URL")
-				ctx.StatusCode(iris.StatusBadRequest)
-			} else {
-				ctx.StatusCode(iris.StatusOK)
-				shortenURL := "http://" + app.ConfigurationReadOnly().GetVHost() + "/u/" + data.Key
-				ctx.ViewData("FORM_RESULT", template.HTML("<pre><a target='_new' href='"+shortenURL+"'>"+shortenURL+" </a></pre>"))
-			}
+		err := ctx.ReadJSON(&value)
+
+		if err != nil {
+			ctx.StatusCode(iris.StatusInternalServerError)
+			return
 		}
 
-		indexHandler(ctx)
+		_, err = url.ParseRequestURI(value.URL)
+
+		if err != nil {
+			ctx.StatusCode(iris.StatusBadRequest)
+			ctx.JSON(map[string]string{"status": "error", "url": "Invalid URL"})
+		} else {
+			data := Entity{}
+
+			if value.CustonKey != "" {
+				if len(strings.Split(value.CustonKey, " ")) != 1 {
+					ctx.StatusCode(iris.StatusBadRequest)
+					ctx.JSON(map[string]string{"status": "error", "custom_key": "Custom URL is invalid"})
+					return
+				}
+
+				obj, _ := repo.FindByKey(value.CustonKey)
+
+				if (obj == Entity{}) {
+					data, err = repo.NewWithCustomKey(value.URL, value.CustonKey)
+				} else {
+					ctx.StatusCode(iris.StatusBadRequest)
+					ctx.JSON(map[string]string{"status": "error", "custom_key": "This key already used"})
+					return
+				}
+
+			} else {
+				data, err = repo.New(value.URL)
+			}
+
+			if err != nil {
+				ctx.StatusCode(iris.StatusInternalServerError)
+			} else {
+				ctx.StatusCode(iris.StatusOK)
+				shortenURL := "http://" + app.ConfigurationReadOnly().GetVHost() + "/" + data.Key
+
+				ctx.JSON(map[string]string{
+					"url":          shortenURL,
+					"original_url": data.URI,
+					"visitors":     strconv.Itoa(data.Visitors),
+					"timestamp":    data.Timestamp.Format("Jan _2 15:04"),
+					"title":        data.URI,
+				})
+			}
+		}
+	})
+
+	app.Get("/{shortkey}", func(ctx context.Context) {
+		execShortURL(ctx, ctx.Params().Get("shortkey"))
 	})
 
 	return app
