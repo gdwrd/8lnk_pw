@@ -4,8 +4,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"strconv"
-	"strings"
 
 	"github.com/kataras/iris"
 	"github.com/kataras/iris/context"
@@ -29,9 +27,13 @@ func main() {
 
 func newApp(session *mgo.Session) *iris.Application {
 	app := iris.Default()
-	coll := session.DB(os.Getenv("URLS_DB")).C("entities")
 
-	repo := NewRepository(DefaultGenerator, coll)
+	db := session.DB(os.Getenv("URLS_DB"))
+	coll := db.C("entities")
+	repo := NewEntityRepository(DefaultGenerator, coll)
+
+	u_coll := db.C("users")
+	u_repo := NewUserRepository(u_coll)
 
 	execShortURL := func(ctx context.Context, key string) {
 		if key == "" {
@@ -51,7 +53,7 @@ func newApp(session *mgo.Session) *iris.Application {
 		obj.Visitors++
 		_ = repo.Collection.Update(bson.M{"key": key}, obj)
 
-		ctx.Redirect(obj.URI, iris.StatusTemporaryRedirect)
+		ctx.Redirect(obj.OriginalURL, iris.StatusTemporaryRedirect)
 	}
 
 	app.StaticWeb("/site", "./client/public")
@@ -82,46 +84,102 @@ func newApp(session *mgo.Session) *iris.Application {
 		} else {
 			data := Entity{}
 
-			if value.CustonKey != "" {
-				if len(strings.Split(value.CustonKey, " ")) != 1 {
-					ctx.StatusCode(iris.StatusBadRequest)
-					ctx.JSON(map[string]string{"status": "error", "custom_key": "Custom URL is invalid"})
-					return
-				}
-
-				obj, _ := repo.FindByKey(value.CustonKey)
-
-				if (obj == Entity{}) {
-					data, err = repo.NewWithCustomKey(value.URL, value.CustonKey)
-				} else {
-					ctx.StatusCode(iris.StatusBadRequest)
-					ctx.JSON(map[string]string{"status": "error", "custom_key": "This key already used"})
-					return
-				}
-
-			} else {
-				data, err = repo.New(value.URL)
-			}
+			data, err = repo.New(value.URL)
 
 			if err != nil {
 				ctx.StatusCode(iris.StatusInternalServerError)
 			} else {
 				ctx.StatusCode(iris.StatusOK)
-				shortenURL := "http://" + app.ConfigurationReadOnly().GetVHost() + "/" + data.Key
+				// shortenURL := "http://" + app.ConfigurationReadOnly().GetVHost() + "/" + data.Key
 
-				ctx.JSON(map[string]string{
-					"url":          shortenURL,
-					"original_url": data.URI,
-					"visitors":     strconv.Itoa(data.Visitors),
-					"timestamp":    data.Timestamp.Format("Jan _2 15:04"),
-					"title":        data.URI,
-				})
+				ctx.JSON(data)
 			}
 		}
 	})
 
 	app.Get("/{shortkey}", func(ctx context.Context) {
 		execShortURL(ctx, ctx.Params().Get("shortkey"))
+	})
+
+	app.Get("/k/{shortkey}", func(ctx context.Context) {
+		key := ctx.Params().Get("shortkey")
+
+		data, err := repo.FindByKey(key)
+
+		if err != nil {
+			ctx.JSON(map[string]string{"status": "error", "key": "key is invalid"})
+			return
+		}
+
+		ctx.JSON(data)
+	})
+
+	app.Post("/user_login", func(ctx context.Context) {
+		obj := User{}
+		err := ctx.ReadJSON(&obj)
+
+		if err != nil {
+			ctx.StatusCode(iris.StatusBadRequest)
+			ctx.JSON(map[string]string{"status": "error", "body": "invalid body"})
+			return
+		}
+
+		user, err := u_repo.FindBySocID(obj.SocialID)
+
+		if (user == User{}) {
+			user, err = u_repo.New(obj)
+
+			if err != nil {
+				ctx.StatusCode(iris.StatusBadRequest)
+				ctx.JSON(map[string]string{"status": "error", "user": "user is invalid"})
+				return
+			}
+		}
+
+		ctx.JSON(user)
+	})
+
+	app.Post("/links_data", func(ctx context.Context) {
+		obj := &struct {
+			Links []string `json:"links"`
+		}{}
+
+		err := ctx.ReadJSON(&obj)
+
+		if err != nil {
+			ctx.StatusCode(iris.StatusBadRequest)
+			return
+		}
+
+		data := []Entity{}
+
+		for _, item := range obj.Links {
+			entity, err := repo.FindByLink(item)
+
+			if err == nil {
+				data = append(data, entity)
+			}
+		}
+
+		ctx.JSON(data)
+	})
+
+	app.Patch("/u_title", func(ctx context.Context) {
+		obj := &struct {
+			Key   string `json:"key"`
+			Title string `json:"title"`
+		}{}
+
+		err := ctx.ReadJSON(&obj)
+
+		if err != nil {
+			ctx.StatusCode(iris.StatusBadRequest)
+			return
+		}
+
+		data, _ := repo.UpdateTitle(obj.Key, obj.Title)
+
+		ctx.JSON(data)
 	})
 
 	return app

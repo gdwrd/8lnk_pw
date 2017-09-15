@@ -1,11 +1,14 @@
 import * as React from 'react';
-import { Header } from './components';
+import { Header, Footer } from './components'
 
 export const App: React.StatelessComponent<{}> = (props) => {
   return (
-    <div className="wrap">
+    <div className="container">
       <Header/>
-      {props.children}
+      <div className="page-content">
+        {props.children}
+      </div>
+      <Footer/>
     </div>
   )
 }
